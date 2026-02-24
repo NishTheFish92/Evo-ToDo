@@ -1,10 +1,12 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
+from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
+from bson import ObjectId
 import os
 
 #Loading the environment variables
@@ -14,7 +16,7 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM")
 ACCESS_TOKEN_EXPIRE_MINUTES = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES")
 
-app = FastAPI()
+router = APIRouter(prefix="/auth")
 
 #Pydantic thingy to enforce json rules for user creation
 class UserCreate(BaseModel):
@@ -28,7 +30,9 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 #Mock DB
-users_db = {}
+client = AsyncIOMotorClient("mongodb://localhost:27017")
+db = client["todo"]
+users = db["users"]
 
 #Password hashing and verification - Easy enough
 def hash_password(password: str):
@@ -55,14 +59,14 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        if username is None:
+        user_id = payload.get("user_id")
+        if user_id is None:
             raise credentials_exception
     except JWTError:
         raise credentials_exception
 
-    user = users_db.get(username)
-    if user is None:
+    user = await users.find_one({"_id" : ObjectId(user_id)})
+    if not user:
         raise credentials_exception
 
     return user
@@ -70,32 +74,34 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 
 #Routes
 
-@app.post("/register")
+@router.post("/register")
 async def register(user: UserCreate):
-    if user.username in users_db:
+    userexist = await users.find_one({"username" : user.username })
+    print("User exist value:", userexist, flush=True)
+    print("\n\n")
+    if userexist:
         raise HTTPException(status_code=400, detail="User already exists")
 
-    users_db[user.username] = {
-        "username": user.username,
-        "hashed_password": hash_password(user.password)
-    }
+    result = users.insert_one({
+        "username" : user.username,
+        "password" : hash_password(user.password)
+    })
 
     return {"message": "User created successfully"}
 #Oauth2Passwordreqform requires data in urlencoded format.
-@app.post("/login")
+@router.post("/login")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = users_db.get(form_data.username)
-
+    user = await users.find_one({"username": form_data.username})
     if not user:
-        raise HTTPException(status_code=400, detail="Invalid credentials")
+        raise HTTPException(status_code=400, detail="Invalid username")
 
-    if not verify_password(form_data.password, user["hashed_password"]):
-        raise HTTPException(status_code=400, detail="Invalid credentials")
+    if not verify_password(form_data.password, user["password"]):
+        raise HTTPException(status_code=400, detail="Invalid password")
 
-    access_token = create_access_token(data={"sub": user["username"]})
+    access_token = create_access_token(data={"user_id": str(user["_id"])})
 
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"access_token": access_token, "token_typ": "bearer"}
 
-@app.get("/protected")
+@router.get("/protected")
 async def protected_route(current_user: dict = Depends(get_current_user)):
     return {"message": f"Hello {current_user['username']}, you are authenticated"}

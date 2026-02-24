@@ -3,7 +3,7 @@ from fastapi import FastAPI
 
 client = AsyncIOMotorClient("mongodb://localhost:27017")
 app = FastAPI()
-db = client["mydatabase"]
+db = client["todo"]
 collection = db["users"]
 @app.get("/test")
 async def test():
